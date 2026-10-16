@@ -1,13 +1,14 @@
+// src/components/app-tabs.web.tsx
 import {
-  Tabs,
   TabList,
-  TabTrigger,
-  TabSlot,
-  TabTriggerSlotProps,
   TabListProps,
+  Tabs,
+  TabSlot,
+  TabTrigger,
+  TabTriggerSlotProps,
 } from 'expo-router/ui';
 import { SymbolView } from 'expo-symbols';
-import { Pressable, useColorScheme, View, StyleSheet } from 'react-native';
+import { Pressable, StyleSheet, useColorScheme, View } from 'react-native';
 
 import { ExternalLink } from './external-link';
 import { ThemedText } from './themed-text';
@@ -21,11 +22,14 @@ export default function AppTabs() {
       <TabSlot style={{ height: '100%' }} />
       <TabList asChild>
         <CustomTabList>
-          <TabTrigger name="home" href="/" asChild>
-            <TabButton>Home</TabButton>
+          {/* Web Tab 1: Chat Screen pointing to root '/' */}
+          <TabTrigger name="index" href="/" asChild>
+            <TabButton>Chat</TabButton>
           </TabTrigger>
-          <TabTrigger name="explore" href="/explore" asChild>
-            <TabButton>Explore</TabButton>
+
+          {/* Web Tab 2: Discover Screen pointing to '/discover' */}
+          <TabTrigger name="discover" href="/discover" asChild>
+            <TabButton>Discover</TabButton>
           </TabTrigger>
         </CustomTabList>
       </TabList>
@@ -38,7 +42,8 @@ export function TabButton({ children, isFocused, ...props }: TabTriggerSlotProps
     <Pressable {...props} style={({ pressed }) => pressed && styles.pressed}>
       <ThemedView
         type={isFocused ? 'backgroundSelected' : 'backgroundElement'}
-        style={styles.tabButtonView}>
+        style={styles.tabButtonView}
+      >
         <ThemedText type="small" themeColor={isFocused ? 'text' : 'textSecondary'}>
           {children}
         </ThemedText>
@@ -54,12 +59,15 @@ export function CustomTabList(props: TabListProps) {
   return (
     <View {...props} style={styles.tabListContainer}>
       <ThemedView type="backgroundElement" style={styles.innerContainer}>
+        {/* App Title / Brand Text */}
         <ThemedText type="smallBold" style={styles.brandText}>
-          Expo Starter
+          Chitchatchit
         </ThemedText>
 
+        {/* Renders the TabTriggers defined above */}
         {props.children}
 
+        {/* Optional Docs Link */}
         <ExternalLink href="https://docs.expo.dev" asChild>
           <Pressable style={styles.externalPressable}>
             <ThemedText type="link">Docs</ThemedText>
@@ -75,6 +83,7 @@ export function CustomTabList(props: TabListProps) {
   );
 }
 
+// StyleSheet for web tab layout
 const styles = StyleSheet.create({
   tabListContainer: {
     position: 'absolute',
