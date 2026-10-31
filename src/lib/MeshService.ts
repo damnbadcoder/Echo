@@ -69,15 +69,21 @@ class MasterMeshService {
     
     const transportBridge: ITransport = {
       send: (bytes: Uint8Array) => {
-        // CHANGED: Slice the massive 290+ byte envelope into safe BLE-sized chunks
+        // Slice the envelope into safe BLE-sized chunks
         const chunks = sliceIntoChunks(bytes);
         
         if (BleMeshModule?.writeRaw) {
-          // Send each chunk over the bridge individually
-          for (const chunk of chunks) {
+          // Stagger chunk dispatches by 25ms so Android BLE hardware buffer does not drop consecutive writes
+          chunks.forEach((chunk, index) => {
             const b64 = bytesToBase64(chunk);
-            BleMeshModule.writeRaw('broadcast', b64);
-          }
+            if (index === 0) {
+              BleMeshModule.writeRaw('broadcast', b64);
+            } else {
+              setTimeout(() => {
+                BleMeshModule.writeRaw('broadcast', b64);
+              }, index * 25);
+            }
+          });
         } else {
           console.log('[MeshService] (Radio Mock) Transmitted', chunks.length, 'chunks');
         }
@@ -248,7 +254,7 @@ class MasterMeshService {
     await insertMessage(newMessage);
 
     const displayName = await getDisplayName();
-    const structuredPayload = JSON.stringify({ name: displayName, text: content });
+    const structuredPayload = JSON.stringify({ name: displayName, text: content, room: peerId });
 
     const sealedPayload = sealDirectMessage({
       sender: this.identity!,
@@ -303,12 +309,16 @@ class MasterMeshService {
 
       let actualContent = decrypted.body;
       let senderName = decrypted.senderPublicId;
+      let targetRoom = 'global_mesh_room';
 
       try {
         const parsedBody = JSON.parse(decrypted.body);
         if (parsedBody.text && parsedBody.name) {
           actualContent = parsedBody.text;
           senderName = parsedBody.name;
+          if (parsedBody.room) {
+            targetRoom = parsedBody.room;
+          }
         }
       } catch (e) {
       }
@@ -316,7 +326,7 @@ class MasterMeshService {
       const envelopeIdHex = bytesToHex(unpacked.header.envelopeId);
       const incomingMessage: MessageRecord = {
         id: envelopeIdHex,
-        peer_id: 'global_mesh_room',
+        peer_id: targetRoom,
         sender: senderName,
         content: actualContent,
         timestamp: unpacked.header.timestamp,

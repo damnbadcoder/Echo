@@ -15,8 +15,9 @@ if (!globalThis.crypto.getRandomValues) {
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import AppTabs from '@/components/app-tabs';
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { DarkTheme, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { useColorScheme } from 'react-native';
 // 1. Import the new permission gate component
@@ -24,18 +25,18 @@ import RadioAccessGate from '../components/RadioAccessGate';
 
 SplashScreen.preventAutoHideAsync();
 
-// ADD THIS TO SET THE DEFAULT LAUNCH SCREEN
+// SET DEFAULT LAUNCH SCREEN TO DISCOVER (index.tsx)
 export const unstable_settings = {
-  initialRouteName: 'discover',
+  initialRouteName: 'index',
 };
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
   useEffect(() => {
     SplashScreen.hideAsync();
   }, []);
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <ThemeProvider value={DarkTheme}>
+      <StatusBar style="light" />
       {/* 2. Wrap the gate around your app's main visual components */}
       <RadioAccessGate>
         <AnimatedSplashOverlay />

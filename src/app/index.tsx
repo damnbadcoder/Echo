@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { DiscoveredPeer, MeshService, RadioStatus } from '../lib/MeshService';
-import { getDisplayName, saveDisplayName } from '../lib/store';
+import { getDisplayName, saveDisplayName, getSavedRooms, saveRoom } from '../lib/store';
 
 // CHANGED (AI Issue 11): Helper function to translate raw dBm into visual signal bars
 const getSignalBars = (rssi: number) => {
@@ -35,6 +35,9 @@ export default function DiscoverScreen() {
   const [editName, setEditName] = useState('');
   const [isEditing, setIsEditing] = useState(false);
 
+  const [savedRooms, setSavedRooms] = useState<string[]>([]);
+  const [newRoomName, setNewRoomName] = useState('');
+
   const syncMeshState = useCallback(() => {
     setRadioState(MeshService.getRadioStatus());
     setPeers(MeshService.getDiscoveredPeers());
@@ -46,6 +49,8 @@ export default function DiscoverScreen() {
       setDisplayName(name);
       setEditName(name);
     });
+
+    getSavedRooms().then(setSavedRooms);
 
     MeshService.initialize().then(() => {
       syncMeshState();
@@ -71,7 +76,16 @@ export default function DiscoverScreen() {
   };
 
   const openChatWithPeer = (peerId: string) => {
-    router.push({ pathname: '/', params: { peer: peerId } });
+    router.push({ pathname: '/chat' as any, params: { peer: peerId } });
+  };
+
+  const handleJoinRoom = async () => {
+    const clean = newRoomName.trim().toLowerCase().replace(/^#+/, '');
+    if (!clean) return;
+    await saveRoom(clean);
+    setSavedRooms((prev) => (prev.includes(clean) ? prev : [...prev, clean]));
+    setNewRoomName('');
+    router.push({ pathname: '/chat' as any, params: { peer: clean } });
   };
 
   const handleSaveName = async () => {
@@ -83,15 +97,15 @@ export default function DiscoverScreen() {
   };
 
   const getStatusBanner = () => {
-    // CHANGED (User Issue 7 & AI Issue 10): Eradicated technical jargon from radio statuses
+    // Dark-themed status cards with subtle borders
     if (radioState === 'off') {
       return {
         icon: '🔴',
         title: 'Offline',
         subtitle: 'Bluetooth or Location is turned off.',
-        bg: '#FEF2F2',
-        border: '#FECACA',
-        textColor: '#991B1B',
+        bg: '#2A1215',
+        border: '#4C1D24',
+        textColor: '#F87171',
       };
     }
     if (radioState === 'connecting') {
@@ -99,18 +113,18 @@ export default function DiscoverScreen() {
         icon: '🟡',
         title: 'Connecting',
         subtitle: 'Linking to nearby phones...',
-        bg: '#FEFCE8',
-        border: '#FEF08A',
-        textColor: '#854D0E',
+        bg: '#2D1F08',
+        border: '#54380E',
+        textColor: '#FBBF24',
       };
     }
     return {
       icon: '🟢',
       title: 'Active',
       subtitle: 'Looking for nearby phones...',
-      bg: '#F0FDF4',
-      border: '#BBF7D0',
-      textColor: '#166534',
+      bg: '#062817',
+      border: '#0B4D2C',
+      textColor: '#4ADE80',
     };
   };
 
@@ -143,11 +157,6 @@ export default function DiscoverScreen() {
                 {banner.subtitle}
               </Text>
             </View>
-          </View>
-          <View style={styles.helperNoticeBox}>
-            <Text style={styles.helperNoticeText}>
-              ⚠️ Offline Chat requires both Bluetooth and Location turned ON in your phone settings.
-            </Text>
           </View>
         </View>
 
@@ -190,7 +199,7 @@ export default function DiscoverScreen() {
 
           {peers.length === 0 ? (
             <View style={styles.emptyStateBox}>
-              <ActivityIndicator size="large" color="#007AFF" />
+              <ActivityIndicator size="large" color="#7C3AED" />
               <Text style={styles.emptyStateText}>
                 No devices in range. Keep phones within 15–30 meters.
               </Text>
@@ -206,37 +215,65 @@ export default function DiscoverScreen() {
                     {typeof peer.rssi === 'number' ? `\n${getSignalBars(peer.rssi)}` : ''}
                   </Text>
                 </View>
+                <TouchableOpacity
+                  style={styles.messagePeerBtn}
+                  onPress={() => openChatWithPeer(peer.peerId)}
+                >
+                  <Text style={styles.messagePeerBtnText}>Message</Text>
+                </TouchableOpacity>
               </View>
             ))
           )}
         </View>
 
-        {/* 4. PUBLIC BROADCAST ROOM */}
+        {/* 4. ROOMS (PUBLIC & PRIVATE) */}
         <View style={styles.card}>
-          <Text style={styles.cardSectionTitle}>Public Rooms</Text>
+          <Text style={styles.cardSectionTitle}>Rooms</Text>
 
+          {/* Public Room */}
           <TouchableOpacity
             style={styles.channelRow}
             onPress={() => openChatWithPeer('global_mesh_room')}
           >
             <View style={styles.channelInfo}>
-              {/* CHANGED (User Issue 7): Eradicated `#global_mesh_room` jargon from the UI */}
               <Text style={styles.channelName}>Public Room</Text>
-              <Text style={styles.channelDesc}>
-                Chat with everyone nearby at once
-              </Text>
-              <Text style={styles.channelStatus}>🟢 Active • Public</Text>
             </View>
             <View style={styles.openChannelBadge}>
               <Text style={styles.openChannelBadgeText}>Chat</Text>
             </View>
           </TouchableOpacity>
-        </View>
 
-        {/* CHANGED (AI Issue 12): Moved the long Node ID to an advanced footer out of the main cards */}
-        <View style={styles.advancedContainer}>
-          <Text style={styles.advancedLabel}>Advanced Details</Text>
-          <Text style={styles.nodeIdHint}>Hardware ID: {nodeId}</Text>
+          {/* Saved Private Rooms */}
+          {savedRooms.map((room) => (
+            <TouchableOpacity
+              key={room}
+              style={styles.channelRow}
+              onPress={() => openChatWithPeer(room)}
+            >
+              <View style={styles.channelInfo}>
+                <Text style={styles.channelName}>#{room}</Text>
+              </View>
+              <View style={styles.openChannelBadge}>
+                <Text style={styles.openChannelBadgeText}>Chat</Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+
+          {/* Create or Join Private Room */}
+          <View style={styles.joinRoomRow}>
+            <TextInput
+              style={styles.roomInput}
+              placeholder="Private room name"
+              placeholderTextColor="#9CA3AF"
+              value={newRoomName}
+              onChangeText={setNewRoomName}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity style={styles.joinRoomBtn} onPress={handleJoinRoom}>
+              <Text style={styles.joinRoomBtnText}>Join</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
       </ScrollView>
@@ -256,48 +293,47 @@ export default function DiscoverScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: '#F3F4F6' },
+  safeArea: { flex: 1, backgroundColor: '#0B0C10' },
   scrollView: { flex: 1 },
   contentContainer: { padding: 16, paddingBottom: 100, gap: 16 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  screenTitle: { fontSize: 24, fontWeight: 'bold', color: '#111827' },
+  screenTitle: { fontSize: 24, fontWeight: 'bold', color: '#FFFFFF' },
   statusCard: { borderWidth: 1, borderRadius: 14, padding: 14, gap: 12 },
   statusHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   statusEmoji: { fontSize: 22 },
   statusTextColumn: { flex: 1 },
   statusTitle: { fontSize: 16, fontWeight: 'bold' },
   statusSubtitle: { fontSize: 13, marginTop: 2 },
-  helperNoticeBox: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderWidth: 1, borderRadius: 10, padding: 10 },
-  helperNoticeText: { fontSize: 12, color: '#92400E', lineHeight: 17 },
-  card: { backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16, borderWidth: 1, borderColor: '#E5E7EB', gap: 12 },
-  cardSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#111827' },
+  card: { backgroundColor: '#13141B', borderRadius: 14, padding: 16, borderWidth: 1, borderColor: '#22232E', gap: 12 },
+  cardSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#F4F4F5' },
   identityRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   editNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  nameInput: { flex: 1, backgroundColor: '#F3F4F6', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15, borderWidth: 1, borderColor: '#D1D5DB' },
-  idBadge: { backgroundColor: '#F3F4F6', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#D1D5DB' },
-  idBadgeText: { fontSize: 15, fontWeight: 'bold', color: '#1F2937' },
-  primaryActionBtn: { backgroundColor: '#007AFF', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
+  nameInput: { flex: 1, backgroundColor: '#1C1D26', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15, borderWidth: 1, borderColor: '#2E303E', color: '#FFFFFF' },
+  idBadge: { backgroundColor: '#1C1D26', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#2E303E' },
+  idBadgeText: { fontSize: 15, fontWeight: 'bold', color: '#FFFFFF' },
+  primaryActionBtn: { backgroundColor: '#7C3AED', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
   primaryActionBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
-  secondaryActionBtn: { backgroundColor: '#EFF6FF', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE' },
-  secondaryActionBtnText: { color: '#1D4ED8', fontWeight: '600', fontSize: 13 },
+  secondaryActionBtn: { backgroundColor: '#2E1065', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#4C1D95' },
+  secondaryActionBtnText: { color: '#C084FC', fontWeight: '600', fontSize: 13 },
   sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  peerCounterText: { fontSize: 12, fontWeight: '600', color: '#6B7280' },
+  peerCounterText: { fontSize: 12, fontWeight: '600', color: '#9CA3AF' },
   emptyStateBox: { alignItems: 'center', justifyContent: 'center', paddingVertical: 24, paddingHorizontal: 16, gap: 12 },
-  emptyStateText: { fontSize: 13, color: '#6B7280', textAlign: 'center', lineHeight: 19 },
-  peerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#F3F4F6' },
+  emptyStateText: { fontSize: 13, color: '#9CA3AF', textAlign: 'center', lineHeight: 19 },
+  peerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#22232E' },
   peerInfo: { flex: 1 },
-  peerTagText: { fontSize: 15, fontWeight: 'bold', color: '#111827' },
-  peerStatusText: { fontSize: 12, color: '#059669', marginTop: 2 },
-  channelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F9FAFB', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#E5E7EB' },
+  peerTagText: { fontSize: 15, fontWeight: 'bold', color: '#FFFFFF' },
+  peerStatusText: { fontSize: 12, color: '#34D399', marginTop: 2 },
+  messagePeerBtn: { backgroundColor: '#7C3AED', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16 },
+  messagePeerBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
+  channelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#1C1D26', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#2E303E' },
   channelInfo: { flex: 1, paddingRight: 8 },
-  channelName: { fontSize: 15, fontWeight: 'bold', color: '#111827' },
-  channelDesc: { fontSize: 12, color: '#4B5563', marginTop: 2 },
-  channelStatus: { fontSize: 12, fontWeight: '600', color: '#15803D', marginTop: 4 },
-  openChannelBadge: { backgroundColor: '#007AFF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
+  channelName: { fontSize: 15, fontWeight: 'bold', color: '#FFFFFF' },
+  openChannelBadge: { backgroundColor: '#7C3AED', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
   openChannelBadgeText: { color: '#FFFFFF', fontSize: 13, fontWeight: 'bold' },
-  fabScanButton: { position: 'absolute', right: 20, bottom: 24, backgroundColor: '#007AFF', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 28, elevation: 4, shadowColor: '#000000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4 },
+  joinRoomRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 },
+  roomInput: { flex: 1, backgroundColor: '#1C1D26', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9, fontSize: 14, borderWidth: 1, borderColor: '#2E303E', color: '#FFFFFF' },
+  joinRoomBtn: { backgroundColor: '#7C3AED', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8 },
+  joinRoomBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
+  fabScanButton: { position: 'absolute', right: 20, bottom: 24, backgroundColor: '#7C3AED', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 28, elevation: 4, shadowColor: '#7C3AED', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.4, shadowRadius: 6 },
   fabScanButtonText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 14 },
-  advancedContainer: { marginTop: 8, paddingHorizontal: 4, alignItems: 'center' },
-  advancedLabel: { fontSize: 12, fontWeight: 'bold', color: '#9CA3AF', marginBottom: 4 },
-  nodeIdHint: { fontSize: 11, color: '#9CA3AF', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', textAlign: 'center' },
 });
