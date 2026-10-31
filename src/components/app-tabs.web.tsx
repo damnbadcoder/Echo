@@ -22,14 +22,14 @@ export default function AppTabs() {
       <TabSlot style={{ height: '100%' }} />
       <TabList asChild>
         <CustomTabList>
-          {/* Web Tab 1: Chat Screen pointing to root '/' */}
+          {/* Web Tab 1: Discover Screen pointing to root '/' */}
           <TabTrigger name="index" href="/" asChild>
-            <TabButton>Chat</TabButton>
+            <TabButton>Discover</TabButton>
           </TabTrigger>
 
-          {/* Web Tab 2: Discover Screen pointing to '/discover' */}
-          <TabTrigger name="discover" href="/discover" asChild>
-            <TabButton>Discover</TabButton>
+          {/* Web Tab 2: Chat Screen pointing to '/chat' */}
+          <TabTrigger name="chat" href="/chat" asChild>
+            <TabButton>Chat</TabButton>
           </TabTrigger>
         </CustomTabList>
       </TabList>

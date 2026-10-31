@@ -174,3 +174,60 @@ export async function getDisplayName(): Promise<string> {
         }
     }
 }
+
+/**
+ * Retrieves the list of joined private/custom room names.
+ */
+export async function getSavedRooms(): Promise<string[]> {
+    const execute = async () => {
+        const db = await getDatabase();
+        const result = await db.getFirstAsync<{ value: string }>(
+            `SELECT value FROM settings WHERE key = 'saved_rooms';`
+        );
+        if (!result?.value) return [];
+        try {
+            return JSON.parse(result.value);
+        } catch {
+            return [];
+        }
+    };
+
+    try {
+        return await execute();
+    } catch (err) {
+        console.warn('[store] getSavedRooms failed, retrying:', err);
+        resetDatabase();
+        try {
+            return await execute();
+        } catch (e) {
+            return [];
+        }
+    }
+}
+
+/**
+ * Saves a new private room name to local settings.
+ */
+export async function saveRoom(name: string): Promise<void> {
+    const clean = name.trim().toLowerCase().replace(/^#+/, '');
+    if (!clean || clean === 'global_mesh_room') return;
+    const current = await getSavedRooms();
+    if (!current.includes(clean)) {
+        current.push(clean);
+        const execute = async () => {
+            const db = await getDatabase();
+            await db.runAsync(
+                `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?);`,
+                ['saved_rooms', JSON.stringify(current)]
+            );
+        };
+
+        try {
+            await execute();
+        } catch (err) {
+            console.warn('[store] saveRoom failed, retrying:', err);
+            resetDatabase();
+            await execute();
+        }
+    }
+}
