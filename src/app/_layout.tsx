@@ -24,6 +24,11 @@ import RadioAccessGate from '../components/RadioAccessGate';
 
 SplashScreen.preventAutoHideAsync();
 
+// ADD THIS TO SET THE DEFAULT LAUNCH SCREEN
+export const unstable_settings = {
+  initialRouteName: 'discover',
+};
+
 export default function TabLayout() {
   const colorScheme = useColorScheme();
   useEffect(() => {

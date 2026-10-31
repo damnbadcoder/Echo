@@ -1,10 +1,10 @@
-// src/app/index.tsx
-import { useLocalSearchParams } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
+// src/app/discover.tsx
+import { useRouter } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
 import {
-  FlatList,
-  KeyboardAvoidingView,
+  ActivityIndicator,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -12,349 +12,292 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { MeshService, RadioStatus } from '../lib/MeshService';
-import { MessageRecord, getMessagesForPeer } from '../lib/store';
+import { DiscoveredPeer, MeshService, RadioStatus } from '../lib/MeshService';
+import { getDisplayName, saveDisplayName } from '../lib/store';
 
-// Default public room ID used when the app opens normally
-const DEFAULT_PEER_ID = 'global_mesh_room';
+// CHANGED (AI Issue 11): Helper function to translate raw dBm into visual signal bars
+const getSignalBars = (rssi: number) => {
+  if (rssi >= -60) return '📶 Strong';
+  if (rssi >= -75) return '📶 Good';
+  if (rssi >= -90) return '📶 Fair';
+  return '📶 Weak';
+};
 
-export default function ChatScreen() {
-  /*
-   * useLocalSearchParams reads any route parameters passed when navigating from the Discover screen.
-   * Why required: When a user clicks "Message" on a detected Bluetooth peer in discover.tsx,
-   * it passes that peer's ID here. If no peer was clicked yet, we fall back to 'global_mesh_room'.
-   */
-  const params = useLocalSearchParams<{ peer?: string }>();
-  const activePeerId =
-    typeof params.peer === 'string' && params.peer.length > 0
-      ? params.peer
-      : DEFAULT_PEER_ID;
+export default function DiscoverScreen() {
+  const router = useRouter();
 
-  // 1. State to store the array of chat messages loaded from local SQLite database
-  const [messages, setMessages] = useState<MessageRecord[]>([]);
-
-  // 2. State to store the text currently typed inside the bottom input box
-  const [inputText, setInputText] = useState('');
-
-  // 3. State to track live Bluetooth radio status ('scanning' | 'connecting' | 'connected' | 'off')
-  // Why required: Solves Problem D so the screen gives live visual feedback on radio state
   const [radioState, setRadioState] = useState<RadioStatus>('scanning');
+  const [peers, setPeers] = useState<DiscoveredPeer[]>([]);
+  const [isPulsing, setIsPulsing] = useState(false);
+  const [nodeId, setNodeId] = useState<string>('Initializing...');
+  
+  const [displayName, setDisplayName] = useState('Anonymous');
+  const [editName, setEditName] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
 
-  // 4. State to track how many nearby phones have been detected over Bluetooth
-  const [peerCount, setPeerCount] = useState<number>(0);
+  const syncMeshState = useCallback(() => {
+    setRadioState(MeshService.getRadioStatus());
+    setPeers(MeshService.getDiscoveredPeers());
+    setNodeId(MeshService.getMyNodeId());
+  }, []);
 
-  /*
-   * Function to load stored messages from SQLite and check the latest radio status from MeshService.
-   * Wrapped in useCallback so React keeps the same function reference unless activePeerId changes.
-   */
-  const loadMessages = useCallback(async () => {
-    try {
-      // Fetch all messages for this room/peer from SQLite (ordered newest first)
-      const storedMessages = await getMessagesForPeer(activePeerId);
-      setMessages(storedMessages);
-    } catch (err) {
-      console.warn('[ChatScreen] Error loading messages from SQLite:', err);
-    } finally {
-      // Directly read the current radio state and discovered peer count from MeshService
-      setRadioState(MeshService.getRadioStatus());
-      setPeerCount(MeshService.getDiscoveredPeers().length);
-    }
-  }, [activePeerId]);
-
-  // useEffect runs when the screen opens to start MeshService and keep messages updated
   useEffect(() => {
-    // 1. Initialize identity keys and Bluetooth radio, then load messages from SQLite
+    getDisplayName().then((name) => {
+      setDisplayName(name);
+      setEditName(name);
+    });
+
     MeshService.initialize().then(() => {
-      loadMessages();
+      syncMeshState();
     });
 
-    // 2. Subscribe to MeshService so whenever a new Bluetooth message arrives, the screen updates immediately
     const unsubscribe = MeshService.subscribe(() => {
-      loadMessages();
+      syncMeshState();
     });
 
-    // 3. Poll every 2 seconds as a backup to refresh messages and connection status
-    const interval = setInterval(() => {
-      loadMessages();
-    }, 2000);
+    const interval = setInterval(syncMeshState, 2000);
 
-    // Cleanup function: stops the timer and removes listener when leaving the screen
     return () => {
       unsubscribe();
       clearInterval(interval);
     };
-  }, [loadMessages]);
+  }, [syncMeshState]);
 
-  // Function called when the user taps the "Send" button
-  const handleSend = async () => {
-    if (inputText.trim() === '') return;
-    const textToSend = inputText.trim();
-    setInputText('');
-
-    try {
-      await MeshService.sendMessage(activePeerId, textToSend, 'me');
-      loadMessages();
-    } catch (err) {
-      console.error('[ChatScreen] Error sending message:', err);
-    }
+  const handleManualScan = () => {
+    setIsPulsing(true);
+    MeshService.pulseScanner();
+    syncMeshState();
+    setTimeout(() => setIsPulsing(false), 1200);
   };
 
+  const openChatWithPeer = (peerId: string) => {
+    router.push({ pathname: '/', params: { peer: peerId } });
+  };
 
-  /*
-   * Helper function that returns the icon, text label, and colors for the top connection pill.
-   * Why required: Solves Problem D (Missing Connection Feedback in the UI).
-   */
-  const getStatusBadge = () => {
+  const handleSaveName = async () => {
+    if (editName.trim()) {
+      await saveDisplayName(editName);
+      setDisplayName(editName.trim());
+    }
+    setIsEditing(false);
+  };
+
+  const getStatusBanner = () => {
+    // CHANGED (User Issue 7 & AI Issue 10): Eradicated technical jargon from radio statuses
     if (radioState === 'off') {
       return {
-        dot: '🔴',
-        label: 'Radio Disconnected',
-        bg: '#FEE2E2',
-        text: '#991B1B',
-      };
-    }
-    if (peerCount > 0 || radioState === 'connected') {
-      return {
-        dot: '🟢',
-        label: `Connected (${peerCount > 0 ? `${peerCount} peer${peerCount > 1 ? 's' : ''}` : 'Mesh Active'})`,
-        bg: '#DCFCE7',
-        text: '#166534',
+        icon: '🔴',
+        title: 'Offline',
+        subtitle: 'Bluetooth or Location is turned off.',
+        bg: '#FEF2F2',
+        border: '#FECACA',
+        textColor: '#991B1B',
       };
     }
     if (radioState === 'connecting') {
       return {
-        dot: '🟡',
-        label: 'Connecting / Handshake...',
-        bg: '#FEF9C3',
-        text: '#854D0E',
+        icon: '🟡',
+        title: 'Connecting',
+        subtitle: 'Linking to nearby phones...',
+        bg: '#FEFCE8',
+        border: '#FEF08A',
+        textColor: '#854D0E',
       };
     }
     return {
-      dot: '🟢',
-      label: 'Scanning for nearby BLE peers...',
-      bg: '#E0F2FE',
-      text: '#075985',
+      icon: '🟢',
+      title: 'Active',
+      subtitle: 'Looking for nearby phones...',
+      bg: '#F0FDF4',
+      border: '#BBF7D0',
+      textColor: '#166534',
     };
   };
 
-  const statusBadge = getStatusBadge();
-  const isPublicRoom = activePeerId === 'global_mesh_room';
-
-  // Function to render each individual message bubble inside the FlatList
-  const renderMessage = ({ item }: { item: MessageRecord }) => {
-    // Check if the message was sent by us ('me') or received from another phone
-    const isMe = item.sender === 'me';
-
-    return (
-      <View style={[styles.messageBubble, isMe ? styles.myMessage : styles.peerMessage]}>
-        {/* If received from another phone, show their shortened cryptographic sender ID at the top of the bubble */}
-        {!isMe && (
-          <Text style={styles.senderLabel}>
-            {item.sender.length > 12
-              ? `${item.sender.slice(0, 6)}...${item.sender.slice(-4)}`
-              : item.sender}
-          </Text>
-        )}
-
-        {/* Main message text */}
-        <Text style={isMe ? styles.myMessageText : styles.peerMessageText}>
-          {item.content}
-        </Text>
-
-        {/* Message time (e.g. 06:45 PM) and delivery status tick ('pending' | 'relayed' | 'delivered') */}
-        <Text style={[styles.timestamp, !isMe && styles.peerTimestamp]}>
-          {new Date(item.timestamp).toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-          })}
-          {isMe && ` • ${item.status}`}
-        </Text>
-      </View>
-    );
-  };
+  const banner = getStatusBanner();
 
   return (
-    // SafeAreaView prevents the top header from overlapping with the phone's notch or status bar clock
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={90}
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.contentContainer}
       >
-        {/* TOP HEADER: Displays Room Name + Live Radio Connection Status Pill (Problem D) */}
-        <View style={styles.headerContainer}>
-          <View style={styles.headerTitleRow}>
-            <Text style={styles.roomTitle}>
-              {isPublicRoom ? '#global_mesh_room' : `Peer: ${activePeerId.slice(0, 10)}`}
-            </Text>
+        <View style={styles.headerRow}>
+          <Text style={styles.screenTitle}>Discover</Text>
+        </View>
 
-            {/* Live Connection Status Badge (Scanning / Connecting / Connected / Disconnected) */}
-            <View style={[styles.statusPill, { backgroundColor: statusBadge.bg }]}>
-              <Text style={[styles.statusPillText, { color: statusBadge.text }]}>
-                {statusBadge.dot} {statusBadge.label}
+        {/* 1. LIVE RADIO STATUS BANNER */}
+        <View
+          style={[
+            styles.statusCard,
+            { backgroundColor: banner.bg, borderColor: banner.border },
+          ]}
+        >
+          <View style={styles.statusHeaderRow}>
+            <Text style={styles.statusEmoji}>{banner.icon}</Text>
+            <View style={styles.statusTextColumn}>
+              <Text style={[styles.statusTitle, { color: banner.textColor }]}>
+                {banner.title}
+              </Text>
+              <Text style={[styles.statusSubtitle, { color: banner.textColor }]}>
+                {banner.subtitle}
               </Text>
             </View>
           </View>
+          <View style={styles.helperNoticeBox}>
+            <Text style={styles.helperNoticeText}>
+              ⚠️ Offline Chat requires both Bluetooth and Location turned ON in your phone settings.
+            </Text>
+          </View>
+        </View>
 
-          {/* Security notice banner reminding user that #global_mesh_room uses a shared channel key */}
-          {isPublicRoom && (
-            <View style={styles.securityBanner}>
-              <Text style={styles.securityBannerText}>
-                ⚠️ Public Mesh Channel • Shared channel key with Ed25519 sender verification
+        {/* 2. MY PROFILE CARD */}
+        <View style={styles.card}>
+          <Text style={styles.cardSectionTitle}>My Profile</Text>
+          {isEditing ? (
+            <View style={styles.editNameRow}>
+              <TextInput
+                style={styles.nameInput}
+                value={editName}
+                onChangeText={setEditName}
+                placeholder="Enter display name"
+                maxLength={20}
+                autoFocus={true}
+              />
+              <TouchableOpacity style={styles.primaryActionBtn} onPress={handleSaveName}>
+                <Text style={styles.primaryActionBtnText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.identityRow}>
+              <View style={styles.idBadge}>
+                <Text style={styles.idBadgeText}>{displayName}</Text>
+              </View>
+              <TouchableOpacity style={styles.secondaryActionBtn} onPress={() => setIsEditing(true)}>
+                <Text style={styles.secondaryActionBtnText}>Edit Name</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {/* CHANGED (AI Issue 12): Node ID was removed from here to reduce clutter */}
+        </View>
+
+        {/* 3. NEARBY DEVICES */}
+        <View style={styles.card}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.cardSectionTitle}>Nearby Devices</Text>
+            <Text style={styles.peerCounterText}>{peers.length} in range</Text>
+          </View>
+
+          {peers.length === 0 ? (
+            <View style={styles.emptyStateBox}>
+              <ActivityIndicator size="large" color="#007AFF" />
+              <Text style={styles.emptyStateText}>
+                No devices in range. Keep phones within 15–30 meters.
               </Text>
             </View>
+          ) : (
+            peers.map((peer) => (
+              <View key={peer.peerId} style={styles.peerRow}>
+                <View style={styles.peerInfo}>
+                  <Text style={styles.peerTagText}>{peer.tag}</Text>
+                  <Text style={styles.peerStatusText}>
+                    {peer.status}
+                    {/* CHANGED (AI Issue 11): Renders "📶 Strong" instead of raw numbers */}
+                    {typeof peer.rssi === 'number' ? `\n${getSignalBars(peer.rssi)}` : ''}
+                  </Text>
+                </View>
+              </View>
+            ))
           )}
         </View>
 
-        {/* INVERTED FLATLIST: Renders newest messages at the bottom of the screen */}
-        <FlatList
-          data={messages}
-          keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          inverted={true}
-          contentContainerStyle={styles.listContent}
-        />
+        {/* 4. PUBLIC BROADCAST ROOM */}
+        <View style={styles.card}>
+          <Text style={styles.cardSectionTitle}>Public Rooms</Text>
 
-        {/* MESSAGE INPUT AREA */}
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.textInput}
-            value={inputText}
-            onChangeText={setInputText}
-            placeholder="Type a message..."
-            placeholderTextColor="#999999"
-          />
-          <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
-            <Text style={styles.sendButtonText}>Send</Text>
+          <TouchableOpacity
+            style={styles.channelRow}
+            onPress={() => openChatWithPeer('global_mesh_room')}
+          >
+            <View style={styles.channelInfo}>
+              {/* CHANGED (User Issue 7): Eradicated `#global_mesh_room` jargon from the UI */}
+              <Text style={styles.channelName}>Public Room</Text>
+              <Text style={styles.channelDesc}>
+                Chat with everyone nearby at once
+              </Text>
+              <Text style={styles.channelStatus}>🟢 Active • Public</Text>
+            </View>
+            <View style={styles.openChannelBadge}>
+              <Text style={styles.openChannelBadgeText}>Chat</Text>
+            </View>
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+
+        {/* CHANGED (AI Issue 12): Moved the long Node ID to an advanced footer out of the main cards */}
+        <View style={styles.advancedContainer}>
+          <Text style={styles.advancedLabel}>Advanced Details</Text>
+          <Text style={styles.nodeIdHint}>Hardware ID: {nodeId}</Text>
+        </View>
+
+      </ScrollView>
+
+      {/* 5. FLOATING SCAN BUTTON (AI Issue 9: Ensured this is the single unified scan button) */}
+      <TouchableOpacity
+        style={styles.fabScanButton}
+        onPress={handleManualScan}
+        activeOpacity={0.85}
+      >
+        <Text style={styles.fabScanButtonText}>
+          {isPulsing ? 'Scanning...' : '📡 Refresh / Scan'}
+        </Text>
+      </TouchableOpacity>
     </SafeAreaView>
   );
 }
 
-// Styles for the header, connection badge, chat bubbles, and bottom input bar
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-  },
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-  },
-  headerContainer: {
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e5e5',
-  },
-  headerTitleRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  roomTitle: {
-    fontSize: 17,
-    fontWeight: 'bold',
-    color: '#111827',
-  },
-  statusPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  statusPillText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  securityBanner: {
-    marginTop: 8,
-    backgroundColor: '#FFFBEB',
-    borderColor: '#FDE68A',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  securityBannerText: {
-    fontSize: 11,
-    color: '#92400E',
-  },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-  },
-  messageBubble: {
-    maxWidth: '80%',
-    padding: 12,
-    borderRadius: 16,
-    marginVertical: 4,
-  },
-  myMessage: {
-    alignSelf: 'flex-end',
-    backgroundColor: '#007AFF',
-    borderBottomRightRadius: 4,
-  },
-  peerMessage: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#E5E5EA',
-    borderBottomLeftRadius: 4,
-  },
-  senderLabel: {
-    fontSize: 11,
-    fontWeight: 'bold',
-    color: '#4B5563',
-    marginBottom: 2,
-  },
-  myMessageText: {
-    color: '#ffffff',
-    fontSize: 16,
-  },
-  peerMessageText: {
-    color: '#000000',
-    fontSize: 16,
-  },
-  timestamp: {
-    fontSize: 10,
-    color: 'rgba(255, 255, 255, 0.7)',
-    alignSelf: 'flex-end',
-    marginTop: 4,
-  },
-  peerTimestamp: {
-    color: '#6B7280',
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    padding: 12,
-    backgroundColor: '#ffffff',
-    borderTopWidth: 1,
-    borderColor: '#e5e5e5',
-    alignItems: 'center',
-  },
-  textInput: {
-    flex: 1,
-    backgroundColor: '#f0f0f0',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    fontSize: 16,
-    maxHeight: 100,
-    color: '#111111',
-  },
-  sendButton: {
-    marginLeft: 12,
-    backgroundColor: '#007AFF',
-    borderRadius: 20,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-  },
-  sendButtonText: {
-    color: '#ffffff',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
+  safeArea: { flex: 1, backgroundColor: '#F3F4F6' },
+  scrollView: { flex: 1 },
+  contentContainer: { padding: 16, paddingBottom: 100, gap: 16 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  screenTitle: { fontSize: 24, fontWeight: 'bold', color: '#111827' },
+  statusCard: { borderWidth: 1, borderRadius: 14, padding: 14, gap: 12 },
+  statusHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  statusEmoji: { fontSize: 22 },
+  statusTextColumn: { flex: 1 },
+  statusTitle: { fontSize: 16, fontWeight: 'bold' },
+  statusSubtitle: { fontSize: 13, marginTop: 2 },
+  helperNoticeBox: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderWidth: 1, borderRadius: 10, padding: 10 },
+  helperNoticeText: { fontSize: 12, color: '#92400E', lineHeight: 17 },
+  card: { backgroundColor: '#FFFFFF', borderRadius: 14, padding: 16, borderWidth: 1, borderColor: '#E5E7EB', gap: 12 },
+  cardSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#111827' },
+  identityRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  editNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  nameInput: { flex: 1, backgroundColor: '#F3F4F6', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15, borderWidth: 1, borderColor: '#D1D5DB' },
+  idBadge: { backgroundColor: '#F3F4F6', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#D1D5DB' },
+  idBadgeText: { fontSize: 15, fontWeight: 'bold', color: '#1F2937' },
+  primaryActionBtn: { backgroundColor: '#007AFF', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
+  primaryActionBtnText: { color: '#FFFFFF', fontWeight: '600', fontSize: 13 },
+  secondaryActionBtn: { backgroundColor: '#EFF6FF', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#BFDBFE' },
+  secondaryActionBtnText: { color: '#1D4ED8', fontWeight: '600', fontSize: 13 },
+  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  peerCounterText: { fontSize: 12, fontWeight: '600', color: '#6B7280' },
+  emptyStateBox: { alignItems: 'center', justifyContent: 'center', paddingVertical: 24, paddingHorizontal: 16, gap: 12 },
+  emptyStateText: { fontSize: 13, color: '#6B7280', textAlign: 'center', lineHeight: 19 },
+  peerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10, borderTopWidth: 1, borderTopColor: '#F3F4F6' },
+  peerInfo: { flex: 1 },
+  peerTagText: { fontSize: 15, fontWeight: 'bold', color: '#111827' },
+  peerStatusText: { fontSize: 12, color: '#059669', marginTop: 2 },
+  channelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#F9FAFB', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#E5E7EB' },
+  channelInfo: { flex: 1, paddingRight: 8 },
+  channelName: { fontSize: 15, fontWeight: 'bold', color: '#111827' },
+  channelDesc: { fontSize: 12, color: '#4B5563', marginTop: 2 },
+  channelStatus: { fontSize: 12, fontWeight: '600', color: '#15803D', marginTop: 4 },
+  openChannelBadge: { backgroundColor: '#007AFF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
+  openChannelBadgeText: { color: '#FFFFFF', fontSize: 13, fontWeight: 'bold' },
+  fabScanButton: { position: 'absolute', right: 20, bottom: 24, backgroundColor: '#007AFF', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 28, elevation: 4, shadowColor: '#000000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4 },
+  fabScanButtonText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 14 },
+  advancedContainer: { marginTop: 8, paddingHorizontal: 4, alignItems: 'center' },
+  advancedLabel: { fontSize: 12, fontWeight: 'bold', color: '#9CA3AF', marginBottom: 4 },
+  nodeIdHint: { fontSize: 11, color: '#9CA3AF', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', textAlign: 'center' },
 });
