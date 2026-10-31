@@ -1,3 +1,4 @@
+// src/lib/store.ts
 import * as SQLite from "expo-sqlite";
 
 export interface MessageRecord {
@@ -26,6 +27,7 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
                 const db = await SQLite.openDatabaseAsync("chitchat.db");
                 await db.execAsync(`
                     PRAGMA journal_mode = WAL;
+                    
                     CREATE TABLE IF NOT EXISTS messages(
                        id TEXT PRIMARY KEY NOT NULL,
                        peer_id TEXT NOT NULL,
@@ -33,6 +35,11 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
                        content TEXT NOT NULL,
                        timestamp INTEGER NOT NULL,
                        status TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS settings(
+                       key TEXT PRIMARY KEY NOT NULL,
+                       value TEXT NOT NULL
                     );
                 `);
                 return db;
@@ -122,6 +129,48 @@ export async function updateMessageStatus(
     }
 }
 
+/**
+ * Saves the user's custom display name to the local settings table.
+ */
+export async function saveDisplayName(name: string): Promise<void> {
+    const execute = async () => {
+        const db = await getDatabase();
+        await db.runAsync(
+            `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?);`,
+            ['display_name', name.trim()]
+        );
+    };
 
+    try {
+        await execute();
+    } catch (err) {
+        console.warn('[store] saveDisplayName failed, retrying:', err);
+        resetDatabase();
+        await execute();
+    }
+}
 
+/**
+ * Retrieves the user's custom display name, defaulting to 'Anonymous' if unset.
+ */
+export async function getDisplayName(): Promise<string> {
+    const execute = async () => {
+        const db = await getDatabase();
+        const result = await db.getFirstAsync<{ value: string }>(
+            `SELECT value FROM settings WHERE key = 'display_name';`
+        );
+        return result?.value || 'Anonymous';
+    };
 
+    try {
+        return await execute();
+    } catch (err) {
+        console.warn('[store] getDisplayName failed, retrying:', err);
+        resetDatabase();
+        try {
+            return await execute();
+        } catch (e) {
+            return 'Anonymous';
+        }
+    }
+}
