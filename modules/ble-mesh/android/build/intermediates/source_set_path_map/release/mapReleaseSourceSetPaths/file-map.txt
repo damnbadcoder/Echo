@@ -1,0 +1,7 @@
+expo.modules.blemesh.ble-mesh-pngs-0 /home/mradu1/chitchatchit/modules/ble-mesh/android/build/generated/res/pngs/release
+expo.modules.blemesh.ble-mesh-resValues-1 /home/mradu1/chitchatchit/modules/ble-mesh/android/build/generated/res/resValues/release
+expo.modules.blemesh.ble-mesh-mergeReleaseResources-2 /home/mradu1/chitchatchit/modules/ble-mesh/android/build/intermediates/incremental/release/mergeReleaseResources/merged.dir
+expo.modules.blemesh.ble-mesh-mergeReleaseResources-3 /home/mradu1/chitchatchit/modules/ble-mesh/android/build/intermediates/incremental/release/mergeReleaseResources/stripped.dir
+expo.modules.blemesh.ble-mesh-release-4 /home/mradu1/chitchatchit/modules/ble-mesh/android/build/intermediates/merged_res/release/mergeReleaseResources
+expo.modules.blemesh.ble-mesh-main-5 /home/mradu1/chitchatchit/modules/ble-mesh/android/src/main/res
+expo.modules.blemesh.ble-mesh-release-6 /home/mradu1/chitchatchit/modules/ble-mesh/android/src/release/res

@@ -1,85 +1,108 @@
-import { x25519 } from "@noble/curves/ed25519.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
-import { Platform } from "react-native";
-import { base64ToBytes, bytesToBase64 } from "./base64";
-import {
-  getOrCreateIdentity,
-  IdentityKeyPair,
-  openDirectMessage,
-  sealDirectMessage,
-} from "./crypto-core";
-import { EnvelopeDispatcher, ITransport } from "./dispatcher";
-import { EnvelopeType, packEnvelope, unpackEnvelope } from "./protocol";
-import { insertMessage, MessageRecord, updateMessageStatus } from "./store";
+// src/lib/MeshService.ts
 
-export type RadioStatus = "scanning" | "connecting" | "connected" | "off";
+import { x25519 } from '@noble/curves/ed25519.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
+import { Platform } from 'react-native';
+import { base64ToBytes, bytesToBase64 } from './base64';
+import {
+    getOrCreateIdentity,
+    IdentityKeyPair,
+    openDirectMessage,
+    sealDirectMessage,
+} from './crypto-core';
+import { EnvelopeDispatcher, ITransport } from './dispatcher';
+import { EnvelopeType, packEnvelope, unpackEnvelope } from './protocol';
+import { insertMessage, updateMessageStatus, MessageRecord, getDisplayName } from './store';
+// CHANGED: Import the chunker utilities your teammate wrote
+import { sliceIntoChunks, ChunkReassembler } from './chunker';
+
+export type RadioStatus = 'scanning' | 'connecting' | 'connected' | 'off';
 
 export interface DiscoveredPeer {
   peerId: string;
   tag: string;
-  status: "In Range" | "Direct Peer";
+  status: 'In Range' | 'Direct Peer';
   rssi?: number;
   lastSeen: number;
 }
 
 let BleMeshModule: any = null;
 try {
-  if (Platform.OS !== "web") {
+  if (Platform.OS !== 'web') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    BleMeshModule = require("../../modules/ble-mesh").default;
+    BleMeshModule = require('../../modules/ble-mesh').default;
   }
 } catch {
-  console.warn("BleMesh active module not found, running in mock mode.");
+  console.warn('BleMesh active module not found, running in mock mode.');
 }
+
+const GLOBAL_ROOM_SEED = new TextEncoder().encode(
+  'chitchatchit:channel:global_mesh_room:v1'
+);
+const GLOBAL_ROOM_X_SECRET = sha256(GLOBAL_ROOM_SEED);
+const GLOBAL_ROOM_X_PUBLIC = x25519.getPublicKey(GLOBAL_ROOM_X_SECRET);
 
 class MasterMeshService {
   private identity: IdentityKeyPair | null = null;
   private dispatcher: EnvelopeDispatcher | null = null;
   private onMessageListeners: Array<() => void> = [];
-  private radioStatus: RadioStatus = "scanning";
+  private radioStatus: RadioStatus = 'scanning';
   private discoveredPeers: Map<string, DiscoveredPeer> = new Map();
   private isInitialized: boolean = false;
-
-  // ISSUE 8 LOGIC: Store all channels the user has joined
-  private subscribedChannels: Set<string> = new Set(["global_mesh_room"]);
+  
+  // CHANGED: Instantiate the chunk reassembler to hold partial messages
+  private reassembler: ChunkReassembler = new ChunkReassembler();
 
   async initialize(): Promise<void> {
     if (this.isInitialized && this.identity) {
       return;
     }
 
-    console.log("[MeshService] Initializing...");
+    console.log('[MeshService] Initializing...');
     try {
       this.identity = await getOrCreateIdentity();
+      console.log('[MeshService] Identity loaded. Public ID:', this.identity.publicId);
     } catch (err) {
-      console.error("[MeshService] Error loading identity:", err);
+      console.error('[MeshService] Error loading identity:', err);
     }
-
+    
     const transportBridge: ITransport = {
       send: (bytes: Uint8Array) => {
+        // CHANGED: Slice the massive 290+ byte envelope into safe BLE-sized chunks
+        const chunks = sliceIntoChunks(bytes);
+        
         if (BleMeshModule?.writeRaw) {
-          const b64 = bytesToBase64(bytes);
-          BleMeshModule.writeRaw("broadcast", b64);
+          // Send each chunk over the bridge individually
+          for (const chunk of chunks) {
+            const b64 = bytesToBase64(chunk);
+            BleMeshModule.writeRaw('broadcast', b64);
+          }
+        } else {
+          console.log('[MeshService] (Radio Mock) Transmitted', chunks.length, 'chunks');
         }
       },
-      on: (_event: "payload", callback: (data: Uint8Array) => void) => {
+      on: (_event: 'payload', callback: (data: Uint8Array) => void) => {
         if (BleMeshModule?.addListener) {
           BleMeshModule.addListener(
-            "onRawData",
-            (evt: {
-              peerId?: string;
-              base64Bytes?: string;
-              payload?: string;
-            }) => {
+            'onRawData',
+            (evt: { peerId?: string; base64Bytes?: string; payload?: string }) => {
               const b64 = evt.base64Bytes || evt.payload;
               if (!b64) return;
               if (evt.peerId) {
-                this.recordPeerSeen(evt.peerId, "Direct Peer");
+                this.recordPeerSeen(evt.peerId, 'Direct Peer');
               }
-              const raw = base64ToBytes(b64);
-              callback(raw);
-            },
+              
+              const rawChunk = base64ToBytes(b64);
+              
+              // CHANGED: Feed the incoming chunk into the reassembler
+              const completeEnvelope = this.reassembler.ingestChunk(evt.peerId || 'unknown', rawChunk);
+              
+              // Only pass to the dispatcher if the chunk completed the full envelope
+              if (completeEnvelope) {
+                callback(completeEnvelope);
+              }
+            }
           );
         }
       },
@@ -94,19 +117,24 @@ class MasterMeshService {
 
     this.isInitialized = true;
     this.notifyListeners();
+    
+    // Periodically clean up orphaned chunks from phones that walked out of range
+    setInterval(() => {
+      this.reassembler.sweepExpired();
+    }, 30000);
   }
 
   private startNativeRadio(): void {
     if (BleMeshModule?.startRadio) {
       try {
-        this.radioStatus = "scanning";
+        this.radioStatus = 'scanning';
         BleMeshModule.startRadio();
       } catch (err) {
-        console.warn("[MeshService] Failed to start radio:", err);
-        this.radioStatus = "off";
+        console.warn('[MeshService] Failed to start radio:', err);
+        this.radioStatus = 'off';
       }
     } else {
-      this.radioStatus = "scanning";
+      this.radioStatus = 'scanning';
     }
     this.notifyListeners();
   }
@@ -115,62 +143,62 @@ class MasterMeshService {
     if (!BleMeshModule?.addListener) return;
     try {
       BleMeshModule.addListener(
-        "onPeerDiscovered",
-        (evt: {
-          peerId?: string;
-          id?: string;
-          rssi?: number;
-          tag?: string;
-        }) => {
+        'onPeerDiscovered',
+        (evt: { peerId?: string; id?: string; rssi?: number; tag?: string }) => {
           const id = evt.peerId || evt.id;
-          if (id) this.recordPeerSeen(id, "In Range", evt.rssi, evt.tag);
-        },
+          if (id) {
+            this.recordPeerSeen(id, 'In Range', evt.rssi, evt.tag);
+          }
+        }
       );
 
       BleMeshModule.addListener(
-        "onPeerConnected",
+        'onPeerConnected',
         (evt: { peerId?: string; id?: string }) => {
           const id = evt.peerId || evt.id;
-          if (id) this.recordPeerSeen(id, "Direct Peer");
-          this.radioStatus = "connected";
+          if (id) {
+            this.recordPeerSeen(id, 'Direct Peer');
+          }
+          this.radioStatus = 'connected';
           this.notifyListeners();
-        },
+        }
       );
 
       BleMeshModule.addListener(
-        "onPeerDisconnected",
+        'onPeerDisconnected',
         (evt: { peerId?: string; id?: string }) => {
           const id = evt.peerId || evt.id;
           if (id) {
             this.discoveredPeers.delete(id);
             if (/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(id)) {
-              if (this.discoveredPeers.size <= 1) this.discoveredPeers.clear();
+              if (this.discoveredPeers.size <= 1) {
+                this.discoveredPeers.clear();
+              }
             }
           }
           this.radioStatus =
-            this.discoveredPeers.size > 0 ? "connected" : "scanning";
+            this.discoveredPeers.size > 0 ? 'connected' : 'scanning';
           this.notifyListeners();
-        },
+        }
       );
-    } catch {}
+    } catch {
+    }
   }
 
   private recordPeerSeen(
     peerId: string,
-    status: "In Range" | "Direct Peer",
+    status: 'In Range' | 'Direct Peer',
     rssi?: number,
-    customTag?: string,
+    customTag?: string
   ): void {
-    const isMacAddress = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(
-      peerId,
-    );
+    const isMacAddress = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(peerId);
 
     if (isMacAddress) {
       const hasRealPeer = Array.from(this.discoveredPeers.keys()).some(
-        (id) => !/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(id),
+        (id) => !/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(id)
       );
       if (hasRealPeer) {
-        this.radioStatus = "connected";
+        this.radioStatus = 'connected';
         this.notifyListeners();
         return;
       }
@@ -182,11 +210,8 @@ class MasterMeshService {
       }
     }
 
-    const shortId = peerId
-      .replace(/[^a-zA-Z0-9]/g, "")
-      .slice(-4)
-      .toUpperCase();
-    const tag = customTag || `Node #${shortId || "PEER"}`;
+    const shortId = peerId.replace(/[^a-zA-Z0-9]/g, '').slice(-4).toUpperCase();
+    const tag = customTag || `Node #${shortId || 'PEER'}`;
 
     this.discoveredPeers.set(peerId, {
       peerId,
@@ -196,53 +221,39 @@ class MasterMeshService {
       lastSeen: Date.now(),
     });
 
-    this.radioStatus = "connected";
+    this.radioStatus = 'connected';
     this.notifyListeners();
-  }
-
-  // ISSUE 8 LOGIC: Add methods to manage channel subscriptions
-  joinChannel(channelId: string) {
-    this.subscribedChannels.add(channelId);
-    this.notifyListeners();
-  }
-
-  leaveChannel(channelId: string) {
-    this.subscribedChannels.delete(channelId);
-    this.notifyListeners();
-  }
-
-  getSubscribedChannels(): string[] {
-    return Array.from(this.subscribedChannels);
   }
 
   async sendMessage(
     peerId: string,
     content: string,
-    senderId: string = "me",
+    senderId: string = 'me'
   ): Promise<MessageRecord> {
-    if (!this.identity) await this.initialize();
+    if (!this.identity) {
+      await this.initialize();
+    }
 
     const messageId = Math.random().toString(36).substring(2, 15);
     const timestamp = Date.now();
 
     const newMessage: MessageRecord = {
       id: messageId,
-      peer_id: peerId, // Automatically routes to the correct channel or direct peer
+      peer_id: peerId,
       sender: senderId,
       content: content,
       timestamp,
-      status: "pending",
+      status: 'pending',
     };
     await insertMessage(newMessage);
 
-    // ISSUE 8 LOGIC: Dynamically generate the shared key for the requested room
-    const seed = new TextEncoder().encode(`chitchatchit:channel:${peerId}:v1`);
-    const dynamicRoomXPublic = x25519.getPublicKey(sha256(seed));
+    const displayName = await getDisplayName();
+    const structuredPayload = JSON.stringify({ name: displayName, text: content });
 
     const sealedPayload = sealDirectMessage({
       sender: this.identity!,
-      recipientXPublic: dynamicRoomXPublic,
-      body: content,
+      recipientXPublic: GLOBAL_ROOM_X_PUBLIC,
+      body: structuredPayload,
     });
 
     const envelopeBytes = packEnvelope({
@@ -252,15 +263,13 @@ class MasterMeshService {
 
     this.dispatcher?.dispatchOutgoing(envelopeBytes);
 
-    await updateMessageStatus(messageId, "relayed");
-    newMessage.status = "relayed";
+    await updateMessageStatus(messageId, 'relayed');
+    newMessage.status = 'relayed';
     this.notifyListeners();
     return newMessage;
   }
 
-  private async handleIncomingEnvelope(
-    rawEnvelopeBytes: Uint8Array,
-  ): Promise<void> {
+  private async handleIncomingEnvelope(rawEnvelopeBytes: Uint8Array): Promise<void> {
     try {
       if (!this.identity) return;
 
@@ -268,83 +277,67 @@ class MasterMeshService {
       if (unpacked.header.type !== EnvelopeType.Sealed) return;
 
       let decrypted;
-      let matchedChannel = "direct_message";
-
-      // 1. Try personal key first (for Direct Messages)
       try {
+        const sharedChannelRecipient: IdentityKeyPair = {
+          ...this.identity,
+          xSecret: GLOBAL_ROOM_X_SECRET,
+          xPublic: GLOBAL_ROOM_X_PUBLIC,
+        };
+        decrypted = openDirectMessage({
+          recipient: sharedChannelRecipient,
+          packedPayload: unpacked.payload,
+        });
+      } catch {
         decrypted = openDirectMessage({
           recipient: this.identity,
           packedPayload: unpacked.payload,
         });
-      } catch {
-        // 2. ISSUE 8 LOGIC: Try all subscribed channels to see if the packet fits one of our rooms
-        for (const channel of this.subscribedChannels) {
-          try {
-            const seed = new TextEncoder().encode(
-              `chitchatchit:channel:${channel}:v1`,
-            );
-            const channelXSecret = sha256(seed);
-
-            const sharedChannelRecipient = {
-              ...this.identity,
-              xSecret: channelXSecret,
-              xPublic: x25519.getPublicKey(channelXSecret),
-            };
-
-            decrypted = openDirectMessage({
-              recipient: sharedChannelRecipient,
-              packedPayload: unpacked.payload,
-            });
-
-            matchedChannel = channel;
-            break; // Stop looping once successfully decrypted
-          } catch {
-            // Wrong channel, continue looping
-          }
-        }
       }
 
-      // If it still couldn't decrypt, the packet wasn't meant for us or our rooms
-      if (!decrypted) return;
-
       const myEdPublicHex = bytesToHex(this.identity.edPublic);
-      if (decrypted.senderPublicId === myEdPublicHex) return;
+      if (decrypted.senderPublicId === myEdPublicHex) {
+        return;
+      }
 
-      this.recordPeerSeen(decrypted.senderPublicId, "Direct Peer");
+      this.recordPeerSeen(decrypted.senderPublicId, 'Direct Peer');
+
+      let actualContent = decrypted.body;
+      let senderName = decrypted.senderPublicId;
+
+      try {
+        const parsedBody = JSON.parse(decrypted.body);
+        if (parsedBody.text && parsedBody.name) {
+          actualContent = parsedBody.text;
+          senderName = parsedBody.name;
+        }
+      } catch (e) {
+      }
 
       const envelopeIdHex = bytesToHex(unpacked.header.envelopeId);
       const incomingMessage: MessageRecord = {
         id: envelopeIdHex,
-        peer_id: matchedChannel, // Assigns it to the correct UI channel
-        sender: decrypted.senderPublicId,
-        content: decrypted.body,
+        peer_id: 'global_mesh_room',
+        sender: senderName,
+        content: actualContent,
         timestamp: unpacked.header.timestamp,
-        status: "delivered",
+        status: 'delivered',
       };
 
       try {
         await insertMessage(incomingMessage);
       } catch (insertErr) {
-        console.error(
-          "[MeshService] Error inserting incoming message:",
-          insertErr,
-        );
+        console.error('[MeshService] Error inserting incoming message:', insertErr);
       }
       this.notifyListeners();
     } catch (err) {
-      console.warn(
-        "[MeshService] Decryption or verification dropped packet:",
-        err,
-      );
+      console.warn('[MeshService] Decryption or verification dropped packet:', err);
     }
   }
 
   subscribe(callback: () => void): () => void {
     this.onMessageListeners.push(callback);
     return () => {
-      this.onMessageListeners = this.onMessageListeners.filter(
-        (cb) => cb !== callback,
-      );
+      this.onMessageListeners = this.onMessageListeners.filter((cb) => cb !== callback);
     };
   }
 
@@ -354,19 +347,16 @@ class MasterMeshService {
     }
   }
 
-  async onMessageReceived(
-    text: string,
-    senderPeerId: string = "global_mesh_room",
-  ): Promise<void> {
+  async onMessageReceived(text: string, senderPeerId: string = 'global_mesh_room'): Promise<void> {
     if (!this.identity) await this.initialize();
 
     const simulatedMessage: MessageRecord = {
       id: Math.random().toString(36).substring(2, 15),
       peer_id: senderPeerId,
-      sender: "peer_node",
+      sender: 'peer_node',
       content: text,
       timestamp: Date.now(),
-      status: "delivered",
+      status: 'delivered',
     };
 
     await insertMessage(simulatedMessage);
@@ -378,7 +368,7 @@ class MasterMeshService {
   }
 
   getMyNodeId(): string {
-    if (!this.identity) return "Initializing...";
+    if (!this.identity) return 'Initializing...';
     return bytesToHex(this.identity.edPublic);
   }
 
