@@ -15,6 +15,7 @@ import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
+import android.os.Build;
 import android.os.ParcelUuid;
 import android.util.Base64;
 import android.util.Log;
@@ -38,7 +39,7 @@ public class CentralManager {
     public interface CentralEventListener {
         void onPeerDiscovered(String peerId, int rssi);
         void onPeerConnected(String peerId);
-        void onMessageReceived(String base64Bytes);
+        void onMessageReceived(String peerId, String base64Bytes);
         void onDeviceDisconnected(String peerId);
     }
     
@@ -78,8 +79,13 @@ public class CentralManager {
                 .build();
 
         Log.d(TAG, "Starting BLE Scan...");
-        bluetoothLeScanner.startScan(filters, settings, scanCallback);
-        isScanning = true;
+        try {
+            bluetoothLeScanner.startScan(filters, settings, scanCallback);
+            isScanning = true;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception starting BLE scan: ", e);
+            isScanning = false;
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -134,6 +140,20 @@ public class CentralManager {
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             super.onConnectionStateChange(gatt, status, newState);
             
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "GATT connection status error: " + status + ", newState: " + newState);
+                if (bluetoothGatt != null) {
+                    bluetoothGatt.close();
+                    bluetoothGatt = null;
+                }
+                if (connectionListener != null) {
+                    connectionListener.onDeviceDisconnected(gatt.getDevice().getAddress());
+                }
+                Log.d(TAG, "Restarting scanner after GATT error...");
+                startScanning();
+                return;
+            }
+
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.d(TAG, "Successfully connected to " + gatt.getDevice().getAddress());
                 boolean requested = gatt.requestMtu(517);
@@ -190,14 +210,18 @@ public class CentralManager {
                         UUID cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
                         android.bluetooth.BluetoothGattDescriptor descriptor = dataPipe.getDescriptor(cccdUuid);
                         if (descriptor != null) {
-                            descriptor.setValue(android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                            gatt.writeDescriptor(descriptor);
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                gatt.writeDescriptor(descriptor, android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                            } else {
+                                descriptor.setValue(android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                                gatt.writeDescriptor(descriptor);
+                            }
+                        } else {
+                            if (connectionListener != null) {
+                                connectionListener.onPeerConnected(gatt.getDevice().getAddress());
+                            }
                         }
-                        Log.d(TAG, "Data pipe found! Connection established and notifications enabled.");
-                        
-                        if (connectionListener != null) {
-                            connectionListener.onPeerConnected(gatt.getDevice().getAddress());
-                        }
+                        Log.d(TAG, "Data pipe found! Requested notification registration on CCCD.");
                     } else {
                         Log.e(TAG, "Service found, but data pipe is missing.");
                     }
@@ -210,26 +234,45 @@ public class CentralManager {
         }
 
         @Override
-        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
-            super.onCharacteristicChanged(gatt, characteristic);
-            byte[] value = characteristic.getValue();
-            if (value != null && value.length > 0) {
-                String base64Bytes = Base64.encodeToString(value, Base64.NO_WRAP);
-                Log.d(TAG, "Received notification data as Central! Base64: " + base64Bytes);
+        public void onDescriptorWrite(BluetoothGatt gatt, android.bluetooth.BluetoothGattDescriptor descriptor, int status) {
+            super.onDescriptorWrite(gatt, descriptor, status);
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "CCCD notification subscription confirmed by peripheral!");
                 if (connectionListener != null) {
-                    connectionListener.onMessageReceived(base64Bytes);
+                    connectionListener.onPeerConnected(gatt.getDevice().getAddress());
+                }
+            } else {
+                Log.e(TAG, "Failed to write CCCD descriptor, status: " + status);
+                // Connected anyway so Central -> Peripheral writes still work
+                if (connectionListener != null) {
+                    connectionListener.onPeerConnected(gatt.getDevice().getAddress());
+                }
+            }
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                byte[] value = characteristic.getValue();
+                if (value != null && value.length > 0) {
+                    String base64Bytes = Base64.encodeToString(value, Base64.NO_WRAP);
+                    Log.d(TAG, "Received notification data as Central (Legacy)! Base64: " + base64Bytes);
+                    if (connectionListener != null) {
+                        String address = (gatt != null && gatt.getDevice() != null) ? gatt.getDevice().getAddress() : "";
+                        connectionListener.onMessageReceived(address, base64Bytes);
+                    }
                 }
             }
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, byte[] value) {
-            super.onCharacteristicChanged(gatt, characteristic, value);
             if (value != null && value.length > 0) {
                 String base64Bytes = Base64.encodeToString(value, Base64.NO_WRAP);
                 Log.d(TAG, "Received notification data as Central (Tiramisu)! Base64: " + base64Bytes);
                 if (connectionListener != null) {
-                    connectionListener.onMessageReceived(base64Bytes);
+                    String address = (gatt != null && gatt.getDevice() != null) ? gatt.getDevice().getAddress() : "";
+                    connectionListener.onMessageReceived(address, base64Bytes);
                 }
             }
         }
@@ -244,11 +287,17 @@ public class CentralManager {
 
         try {
             byte[] rawBytes = Base64.decode(base64Bytes, Base64.NO_WRAP);
-            dataPipe.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            dataPipe.setValue(rawBytes);
-            
-            boolean success = bluetoothGatt.writeCharacteristic(dataPipe);
-            
+            boolean success;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                int res = bluetoothGatt.writeCharacteristic(dataPipe, rawBytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+                success = (res == android.bluetooth.BluetoothStatusCodes.SUCCESS);
+            } else {
+                dataPipe.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+                dataPipe.setValue(rawBytes);
+                success = bluetoothGatt.writeCharacteristic(dataPipe);
+            }
+
             if (success) {
                 Log.d(TAG, "Successfully pushed bytes to the hardware buffer!");
             } else {

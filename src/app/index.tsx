@@ -42,6 +42,7 @@ export default function DiscoverScreen() {
     setRadioState(MeshService.getRadioStatus());
     setPeers(MeshService.getDiscoveredPeers());
     setNodeId(MeshService.getMyNodeId());
+    getSavedRooms().then(setSavedRooms);
   }, []);
 
   useEffect(() => {
@@ -92,6 +93,7 @@ export default function DiscoverScreen() {
     if (editName.trim()) {
       await saveDisplayName(editName);
       setDisplayName(editName.trim());
+      MeshService.broadcastPresence();
     }
     setIsEditing(false);
   };

@@ -36,7 +36,8 @@ export default function RadioAccessGate({ children }: RadioAccessGateProps) {
         if (isApi31OrHigher) {
           const hasScan = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
           const hasConnect = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-          if (hasScan && hasConnect) {
+          const hasAdvertise = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE);
+          if (hasScan && hasConnect && hasAdvertise) {
             setIsGranted(true);
             setIsChecking(false);
             return;
@@ -51,7 +52,8 @@ export default function RadioAccessGate({ children }: RadioAccessGateProps) {
 
           const allGranted =
             granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN] === PermissionsAndroid.RESULTS.GRANTED &&
-            granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] === PermissionsAndroid.RESULTS.GRANTED;
+            granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] === PermissionsAndroid.RESULTS.GRANTED &&
+            granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE] === PermissionsAndroid.RESULTS.GRANTED;
 
           if (allGranted) {
             setIsGranted(true);

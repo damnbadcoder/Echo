@@ -95,6 +95,9 @@ export default function ChatScreen() {
   const statusBadge = getStatusBadge();
   const isPublicRoom = activePeerId === 'global_mesh_room';
   const isPrivateRoom = !isPublicRoom && !activePeerId.includes(':') && activePeerId.length < 30;
+  const cleanRoomName = isPrivateRoom ? activePeerId.replace(/^#+/, '') : activePeerId;
+  const peerObj = !isPublicRoom && !isPrivateRoom ? MeshService.getPeerInfo(activePeerId) : null;
+  const peerTitle = peerObj ? peerObj.tag : activePeerId.length > 12 ? `${activePeerId.slice(0, 6)}...${activePeerId.slice(-4)}` : activePeerId;
 
   const renderMessage = ({ item }: { item: MessageRecord }) => {
     const isMe = item.sender === 'me';
@@ -130,7 +133,7 @@ export default function ChatScreen() {
       {/* CHANGED (ISSUE 6): Removed the 90px offset on Android so the keyboard no longer hides the input */}
       <KeyboardAvoidingView
         style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
         <View style={styles.headerContainer}>
@@ -143,7 +146,7 @@ export default function ChatScreen() {
                 <Text style={styles.backButtonText}>←</Text>
               </TouchableOpacity>
               <Text style={styles.roomTitle}>
-                {isPublicRoom ? 'Public Room' : isPrivateRoom ? `#${activePeerId}` : `Peer: ${activePeerId.slice(0, 10)}`}
+                {isPublicRoom ? 'Public Room' : isPrivateRoom ? `#${cleanRoomName}` : `Peer: ${peerTitle}`}
               </Text>
             </View>
             <View style={[styles.statusPill, { backgroundColor: statusBadge.bg }]}>
@@ -164,7 +167,7 @@ export default function ChatScreen() {
           {isPrivateRoom && (
             <View style={[styles.securityBanner, { backgroundColor: '#1E1238', borderColor: '#4C1D95' }]}>
               <Text style={[styles.securityBannerText, { color: '#C084FC' }]}>
-                🔒 Private Room • #{activePeerId}
+                🔒 Private Room • #{cleanRoomName}
               </Text>
             </View>
           )}
@@ -176,6 +179,8 @@ export default function ChatScreen() {
           renderItem={renderMessage}
           inverted={true}
           contentContainerStyle={styles.listContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
         />
 
         <View style={styles.inputContainer}>

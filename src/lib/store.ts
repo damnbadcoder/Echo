@@ -41,6 +41,8 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
                        key TEXT PRIMARY KEY NOT NULL,
                        value TEXT NOT NULL
                     );
+
+                    DELETE FROM messages WHERE id LIKE '%_hash';
                 `);
                 return db;
             } catch (err) {
@@ -81,9 +83,11 @@ export async function insertMessage(msg: MessageRecord): Promise<void> {
 export async function getMessagesForPeer(peerId: string): Promise<MessageRecord[]> {
     const execute = async () => {
         const db = await getDatabase();
+        const clean = peerId.trim().toLowerCase().replace(/^#+/, '');
+        const withHash = `#${clean}`;
         return await db.getAllAsync<MessageRecord>(
-            `SELECT * FROM messages WHERE peer_id = ? ORDER BY timestamp DESC;`,
-            [peerId]
+            `SELECT * FROM messages WHERE (peer_id = ? OR peer_id = ? OR peer_id = ?) AND id NOT LIKE '%_hash' ORDER BY timestamp DESC, rowid DESC;`,
+            [peerId, clean, withHash]
         );
     };
 

@@ -1,6 +1,6 @@
 export const CHUNK_VERSION = 0x01;
 export const CHUNK_HEADER_SIZE = 8;
-export const DEFAULT_MAX_CHUNK_SIZE = 180;
+export const DEFAULT_MAX_CHUNK_SIZE = 480;
 export const MAX_CONCURRENT_ASSEMBLIES_PER_PEER = 4;
 export const MAX_ASSEMBLY_BYTES = 32768;
 export const ASSEMBLY_TIMEOUT_MS = 30000;
