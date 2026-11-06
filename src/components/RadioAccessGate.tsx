@@ -120,7 +120,7 @@ export default function RadioAccessGate({ children }: RadioAccessGateProps) {
       <View style={styles.container}>
         {isChecking ? (
           <>
-            <ActivityIndicator size="large" color="#007AFF" />
+            <ActivityIndicator size="large" color="#7C3AED" />
             <Text style={styles.infoText}>
               Requesting Bluetooth Permissions to connect off-grid...
             </Text>
@@ -160,17 +160,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#0B0C10',
   },
   infoText: {
     marginTop: 14,
     fontSize: 15,
-    color: '#333333',
+    color: '#E4E4E7',
     textAlign: 'center',
   },
   retryButton: {
     marginTop: 20,
-    backgroundColor: '#007AFF',
+    backgroundColor: '#7C3AED',
     paddingVertical: 10,
     paddingHorizontal: 20,
     borderRadius: 18,
@@ -185,7 +185,7 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   skipButtonText: {
-    color: '#666666',
+    color: '#A1A1AA',
     fontSize: 13,
   },
 });
