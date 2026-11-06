@@ -16,7 +16,7 @@ export interface Envelope {
 // Defines how we interact with Dev 1's Radio
 export interface ITransport {
   send(payload: Uint8Array): void;
-  on(event: 'payload', callback: (data: Uint8Array) => void): void;
+  on(event: 'payload', callback: (data: Uint8Array, sourcePeerId?: string) => void): void;
 }
 
 
@@ -34,10 +34,10 @@ export class EnvelopeDispatcher {
   // Injects the radio (transport) and the UI delivery function
   constructor(
     private transport: ITransport, 
-    private onDeliverToApp: (rawEnvelopeBytes: Uint8Array) => void
+    private onDeliverToApp: (rawEnvelopeBytes: Uint8Array, sourcePeerId?: string) => void
   ) {
     // Listen to the radio's 'payload' channel and route data to handleIncoming
-    this.transport.on('payload', (rawBytes) => this.handleIncoming(rawBytes));
+    this.transport.on('payload', (rawBytes, sourcePeerId) => this.handleIncoming(rawBytes, sourcePeerId));
   }
 
   /**
@@ -61,7 +61,7 @@ export class EnvelopeDispatcher {
    * ACTION 2: RECEIVING (Radio -> Bob)
    * Receives a raw string, inflates it, drops duplicates, and delivers to UI.
    */
-  public handleIncoming(rawEnvelopeBytes: Uint8Array): boolean {
+  public handleIncoming(rawEnvelopeBytes: Uint8Array, sourcePeerId?: string): boolean {
 
     try {
       const unpacked = unpackEnvelope(rawEnvelopeBytes);
@@ -72,7 +72,7 @@ export class EnvelopeDispatcher {
         }
 
         this.seen.add(envelopeIdHex);
-        this.onDeliverToApp(rawEnvelopeBytes);
+        this.onDeliverToApp(rawEnvelopeBytes, sourcePeerId);
         return true;
     } catch (error) {
       return false;

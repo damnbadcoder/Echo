@@ -13,7 +13,7 @@ import {
 } from './crypto-core';
 import { EnvelopeDispatcher, ITransport } from './dispatcher';
 import { EnvelopeType, packEnvelope, unpackEnvelope } from './protocol';
-import { insertMessage, updateMessageStatus, MessageRecord, getDisplayName } from './store';
+import { insertMessage, updateMessageStatus, MessageRecord, getDisplayName, saveRoom } from './store';
 // CHANGED: Import the chunker utilities your teammate wrote
 import { sliceIntoChunks, ChunkReassembler } from './chunker';
 
@@ -49,6 +49,7 @@ class MasterMeshService {
   private onMessageListeners: Array<() => void> = [];
   private radioStatus: RadioStatus = 'scanning';
   private discoveredPeers: Map<string, DiscoveredPeer> = new Map();
+  private macToPeerIdMap: Map<string, string> = new Map();
   private isInitialized: boolean = false;
   
   // CHANGED: Instantiate the chunk reassembler to hold partial messages
@@ -73,7 +74,7 @@ class MasterMeshService {
         const chunks = sliceIntoChunks(bytes);
         
         if (BleMeshModule?.writeRaw) {
-          // Stagger chunk dispatches by 25ms so Android BLE hardware buffer does not drop consecutive writes
+          // Stagger chunk dispatches by 60ms so Android BLE hardware buffer does not drop consecutive writes
           chunks.forEach((chunk, index) => {
             const b64 = bytesToBase64(chunk);
             if (index === 0) {
@@ -81,14 +82,14 @@ class MasterMeshService {
             } else {
               setTimeout(() => {
                 BleMeshModule.writeRaw('broadcast', b64);
-              }, index * 25);
+              }, index * 60);
             }
           });
         } else {
           console.log('[MeshService] (Radio Mock) Transmitted', chunks.length, 'chunks');
         }
       },
-      on: (_event: 'payload', callback: (data: Uint8Array) => void) => {
+      on: (_event: 'payload', callback: (data: Uint8Array, sourcePeerId?: string) => void) => {
         if (BleMeshModule?.addListener) {
           BleMeshModule.addListener(
             'onRawData',
@@ -106,7 +107,7 @@ class MasterMeshService {
               
               // Only pass to the dispatcher if the chunk completed the full envelope
               if (completeEnvelope) {
-                callback(completeEnvelope);
+                callback(completeEnvelope, evt.peerId);
               }
             }
           );
@@ -114,8 +115,8 @@ class MasterMeshService {
       },
     };
 
-    this.dispatcher = new EnvelopeDispatcher(transportBridge, (rawEnvelope) => {
-      this.handleIncomingEnvelope(rawEnvelope);
+    this.dispatcher = new EnvelopeDispatcher(transportBridge, (rawEnvelope, sourcePeerId) => {
+      this.handleIncomingEnvelope(rawEnvelope, sourcePeerId);
     });
 
     this.attachDiscoveryListeners();
@@ -167,6 +168,11 @@ class MasterMeshService {
           }
           this.radioStatus = 'connected';
           this.notifyListeners();
+
+          // Broadcast our display name so connected peer immediately sees our name
+          setTimeout(() => {
+            this.broadcastPresence();
+          }, 800);
         }
       );
 
@@ -176,6 +182,11 @@ class MasterMeshService {
           const id = evt.peerId || evt.id;
           if (id) {
             this.discoveredPeers.delete(id);
+            const canonicalId = this.macToPeerIdMap.get(id);
+            if (canonicalId) {
+              this.discoveredPeers.delete(canonicalId);
+              this.macToPeerIdMap.delete(id);
+            }
             if (/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(id)) {
               if (this.discoveredPeers.size <= 1) {
                 this.discoveredPeers.clear();
@@ -199,36 +210,78 @@ class MasterMeshService {
   ): void {
     const isMacAddress = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(peerId);
 
-    if (isMacAddress) {
-      const hasRealPeer = Array.from(this.discoveredPeers.keys()).some(
-        (id) => !/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(id)
-      );
-      if (hasRealPeer) {
-        this.radioStatus = 'connected';
-        this.notifyListeners();
-        return;
-      }
-    } else {
-      for (const key of this.discoveredPeers.keys()) {
-        if (/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(key)) {
+    // If this MAC is already mapped to a canonical peer, update that canonical peer instead
+    const canonicalId = (isMacAddress && this.macToPeerIdMap.has(peerId))
+      ? this.macToPeerIdMap.get(peerId)!
+      : peerId;
+
+    // If this is a MAC address and we already have a canonical peer recorded for it, update RSSI/status and don't re-add MAC
+    if (isMacAddress && canonicalId !== peerId && this.discoveredPeers.has(canonicalId)) {
+      const canonicalPeer = this.discoveredPeers.get(canonicalId)!;
+      if (typeof rssi === 'number') canonicalPeer.rssi = rssi;
+      canonicalPeer.lastSeen = Date.now();
+      if (status === 'Direct Peer') canonicalPeer.status = 'Direct Peer';
+      this.notifyListeners();
+      return;
+    }
+
+    const shortId = canonicalId.replace(/[^a-zA-Z0-9]/g, '').slice(-4).toUpperCase();
+    const fallbackTag = `Node #${shortId || 'PEER'}`;
+
+    const existing = this.discoveredPeers.get(canonicalId);
+    const tag = customTag || existing?.tag || fallbackTag;
+
+    this.discoveredPeers.set(canonicalId, {
+      peerId: canonicalId,
+      tag,
+      status: status || existing?.status || 'In Range',
+      rssi: typeof rssi === 'number' ? rssi : existing?.rssi,
+      lastSeen: Date.now(),
+    });
+
+    // Remove any placeholder/ghost entry that belongs to this peer
+    for (const [key, p] of this.discoveredPeers.entries()) {
+      if (key !== canonicalId) {
+        if (
+          this.macToPeerIdMap.get(key) === canonicalId ||
+          (customTag && !customTag.startsWith('Node #') && p.tag === customTag)
+        ) {
           this.discoveredPeers.delete(key);
         }
       }
     }
 
-    const shortId = peerId.replace(/[^a-zA-Z0-9]/g, '').slice(-4).toUpperCase();
-    const tag = customTag || `Node #${shortId || 'PEER'}`;
-
-    this.discoveredPeers.set(peerId, {
-      peerId,
-      tag,
-      status,
-      rssi,
-      lastSeen: Date.now(),
-    });
-
     this.radioStatus = 'connected';
     this.notifyListeners();
+  }
+
+  async broadcastPresence(): Promise<void> {
+    try {
+      if (!this.identity) await this.initialize();
+      if (!this.identity) return;
+
+      const displayName = (await getDisplayName()) || 'Anonymous';
+      const payload = JSON.stringify({
+        type: 'presence',
+        name: displayName,
+        senderId: this.getMyNodeId(),
+      });
+
+      const sealedPayload = sealDirectMessage({
+        sender: this.identity,
+        recipientXPublic: GLOBAL_ROOM_X_PUBLIC,
+        body: payload,
+      });
+
+      const envelopeBytes = packEnvelope({
+        type: EnvelopeType.Sealed,
+        payload: sealedPayload,
+      });
+
+      this.dispatcher?.dispatchOutgoing(envelopeBytes);
+    } catch (err) {
+      console.warn('[MeshService] Error broadcasting presence:', err);
+    }
   }
 
   async sendMessage(
@@ -243,9 +296,13 @@ class MasterMeshService {
     const messageId = Math.random().toString(36).substring(2, 15);
     const timestamp = Date.now();
 
+    const isPublicRoom = peerId === 'global_mesh_room';
+    const isChannel = !isPublicRoom && !peerId.includes(':') && peerId.length < 30;
+    const cleanPeerId = isChannel ? peerId.toLowerCase().replace(/^#+/, '').trim() : peerId;
+
     const newMessage: MessageRecord = {
       id: messageId,
-      peer_id: peerId,
+      peer_id: cleanPeerId,
       sender: senderId,
       content: content,
       timestamp,
@@ -253,8 +310,19 @@ class MasterMeshService {
     };
     await insertMessage(newMessage);
 
-    const displayName = await getDisplayName();
-    const structuredPayload = JSON.stringify({ name: displayName, text: content, room: peerId });
+    if (isChannel) {
+      await saveRoom(cleanPeerId);
+    }
+
+    const displayName = (await getDisplayName()) || 'Anonymous';
+    const myNodeId = this.getMyNodeId();
+    const structuredPayload = JSON.stringify({
+      type: 'message',
+      name: displayName,
+      text: content,
+      room: cleanPeerId,
+      senderId: myNodeId,
+    });
 
     const sealedPayload = sealDirectMessage({
       sender: this.identity!,
@@ -275,7 +343,7 @@ class MasterMeshService {
     return newMessage;
   }
 
-  private async handleIncomingEnvelope(rawEnvelopeBytes: Uint8Array): Promise<void> {
+  private async handleIncomingEnvelope(rawEnvelopeBytes: Uint8Array, sourcePeerId?: string): Promise<void> {
     try {
       if (!this.identity) return;
 
@@ -305,39 +373,105 @@ class MasterMeshService {
         return;
       }
 
-      this.recordPeerSeen(decrypted.senderPublicId, 'Direct Peer');
-
       let actualContent = decrypted.body;
       let senderName = decrypted.senderPublicId;
       let targetRoom = 'global_mesh_room';
+      let payloadType = 'message';
+      let senderNodeId = decrypted.senderPublicId;
 
       try {
         const parsedBody = JSON.parse(decrypted.body);
-        if (parsedBody.text && parsedBody.name) {
-          actualContent = parsedBody.text;
-          senderName = parsedBody.name;
-          if (parsedBody.room) {
-            targetRoom = parsedBody.room;
+        if (parsedBody && typeof parsedBody === 'object') {
+          if (parsedBody.type === 'presence') {
+            payloadType = 'presence';
+          }
+          if (typeof parsedBody.text === 'string') {
+            actualContent = parsedBody.text;
+          }
+          if (typeof parsedBody.name === 'string' && parsedBody.name.trim().length > 0) {
+            senderName = parsedBody.name.trim();
+          }
+          if (typeof parsedBody.room === 'string' && parsedBody.room.trim().length > 0) {
+            targetRoom = parsedBody.room.trim();
+          }
+          if (typeof parsedBody.senderId === 'string' && parsedBody.senderId.trim().length > 0) {
+            senderNodeId = parsedBody.senderId.trim();
           }
         }
       } catch (e) {
       }
 
-      const envelopeIdHex = bytesToHex(unpacked.header.envelopeId);
-      const incomingMessage: MessageRecord = {
-        id: envelopeIdHex,
-        peer_id: targetRoom,
-        sender: senderName,
-        content: actualContent,
-        timestamp: unpacked.header.timestamp,
-        status: 'delivered',
-      };
-
-      try {
-        await insertMessage(incomingMessage);
-      } catch (insertErr) {
-        console.error('[MeshService] Error inserting incoming message:', insertErr);
+      // Map the physical source MAC address to this peer's cryptographic public key
+      let existingRssi: number | undefined;
+      if (sourcePeerId) {
+        this.macToPeerIdMap.set(sourcePeerId, decrypted.senderPublicId);
+        const macEntry = this.discoveredPeers.get(sourcePeerId);
+        if (macEntry) {
+          existingRssi = macEntry.rssi;
+          this.discoveredPeers.delete(sourcePeerId);
+        }
       }
+
+      // Record ONLY the canonical cryptographic peer ID (never duplicate MAC and Public ID)
+      this.recordPeerSeen(decrypted.senderPublicId, 'Direct Peer', existingRssi, senderName);
+
+      // Presence broadcasts only sync node discovery, do not persist to messages table
+      if (payloadType === 'presence') {
+        this.notifyListeners();
+        return;
+      }
+
+      const envelopeIdHex = bytesToHex(unpacked.header.envelopeId);
+      const isPublicRoom = targetRoom === 'global_mesh_room';
+      const isChannel = !isPublicRoom && !targetRoom.includes(':') && targetRoom.length < 30;
+
+      if (isPublicRoom) {
+        const incomingMessage: MessageRecord = {
+          id: envelopeIdHex,
+          peer_id: 'global_mesh_room',
+          sender: senderName,
+          content: actualContent,
+          timestamp: Date.now(),
+          status: 'delivered',
+        };
+        await insertMessage(incomingMessage);
+      } else if (isChannel) {
+        const cleanChannel = targetRoom.toLowerCase().replace(/^#+/, '').trim();
+        const incomingMessage: MessageRecord = {
+          id: envelopeIdHex,
+          peer_id: cleanChannel,
+          sender: senderName,
+          content: actualContent,
+          timestamp: Date.now(),
+          status: 'delivered',
+        };
+        await insertMessage(incomingMessage);
+
+        // Ensure channel is saved in local saved_rooms
+        await saveRoom(cleanChannel);
+      } else {
+        // Direct 1-on-1 message!
+        // To this recipient, the conversation thread belongs to the sender:
+        const incomingMessage: MessageRecord = {
+          id: envelopeIdHex,
+          peer_id: decrypted.senderPublicId,
+          sender: senderName,
+          content: actualContent,
+          timestamp: Date.now(),
+          status: 'delivered',
+        };
+        await insertMessage(incomingMessage);
+
+        // Also store aliased for the physical sourcePeerId (BLE MAC) so chat opened by MAC shows message
+        if (sourcePeerId && sourcePeerId !== decrypted.senderPublicId) {
+          await insertMessage({
+            ...incomingMessage,
+            id: `${envelopeIdHex}_alias`,
+            peer_id: sourcePeerId,
+          });
+        }
+      }
+
       this.notifyListeners();
     } catch (err) {
       console.warn('[MeshService] Decryption or verification dropped packet:', err);
@@ -383,11 +517,44 @@ class MasterMeshService {
   }
 
   getDiscoveredPeers(): DiscoveredPeer[] {
-    return Array.from(this.discoveredPeers.values());
+    const unique = new Map<string, DiscoveredPeer>();
+    for (const peer of this.discoveredPeers.values()) {
+      // If this entry is a MAC address already mapped to a canonical peer, skip it
+      if (
+        /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(peer.peerId) &&
+        this.macToPeerIdMap.has(peer.peerId)
+      ) {
+        continue;
+      }
+      // Deduplicate by tag if it's a real name, otherwise by peerId
+      const dedupKey =
+        peer.tag && !peer.tag.startsWith('Node #') && peer.tag !== 'Anonymous'
+          ? `tag:${peer.tag.toLowerCase().trim()}`
+          : `id:${peer.peerId}`;
+
+      if (!unique.has(dedupKey)) {
+        unique.set(dedupKey, peer);
+      }
+    }
+    return Array.from(unique.values());
+  }
+
+  getPeerInfo(peerId: string): DiscoveredPeer | undefined {
+    const canonicalId = this.macToPeerIdMap.get(peerId) || peerId;
+    return this.discoveredPeers.get(canonicalId) || this.discoveredPeers.get(peerId);
   }
 
   pulseScanner(): void {
-    this.startNativeRadio();
+    if (BleMeshModule?.stopRadio && BleMeshModule?.startRadio) {
+      try {
+        BleMeshModule.stopRadio();
+      } catch {}
+      setTimeout(() => {
+        this.startNativeRadio();
+      }, 100);
+    } else {
+      this.startNativeRadio();
+    }
   }
 }
 

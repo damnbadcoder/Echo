@@ -21,8 +21,8 @@ class BleMeshModule : Module() {
           sendEvent("onPeerConnected", mapOf("peerId" to peerId))
         }
 
-        override fun onMessageReceived(base64Bytes: String) {
-          sendEvent("onRawData", mapOf("base64Bytes" to base64Bytes, "payload" to base64Bytes))
+        override fun onMessageReceived(peerId: String, base64Bytes: String) {
+          sendEvent("onRawData", mapOf("peerId" to peerId, "base64Bytes" to base64Bytes, "payload" to base64Bytes))
         }
 
         override fun onDeviceDisconnected(peerId: String) {
@@ -43,8 +43,8 @@ class BleMeshModule : Module() {
           sendEvent("onPeerConnected", mapOf("peerId" to peerId))
         }
 
-        override fun onMessageReceived(base64Bytes: String) {
-          sendEvent("onRawData", mapOf("base64Bytes" to base64Bytes, "payload" to base64Bytes))
+        override fun onMessageReceived(peerId: String, base64Bytes: String) {
+          sendEvent("onRawData", mapOf("peerId" to peerId, "base64Bytes" to base64Bytes, "payload" to base64Bytes))
         }
 
         override fun onDeviceDisconnected(peerId: String) {
@@ -62,8 +62,16 @@ class BleMeshModule : Module() {
     Events("onRawData", "onPeerDiscovered", "onPeerConnected", "onDeviceDisconnected")
 
     Function("startRadio") {
-      centralManager?.startScanning()
-      peripheralManager?.startAdvertising()
+      try {
+        centralManager?.startScanning()
+      } catch (e: Throwable) {
+        android.util.Log.e("BleMeshModule", "Error starting scanning: ${e.message}")
+      }
+      try {
+        peripheralManager?.startAdvertising()
+      } catch (e: Throwable) {
+        android.util.Log.e("BleMeshModule", "Error starting advertising: ${e.message}")
+      }
     }
     
     Function("stopRadio") {
